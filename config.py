@@ -1,11 +1,27 @@
 """Configuration settings for the ADK A2A Notion-ElevenLabs integration."""
 
 import os
+import logging
 from typing import Final
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging to prevent interference with user interaction
+logging.basicConfig(
+    level=logging.WARNING,  # Use WARNING level to reduce noise
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# Disable litellm debug logging system-wide
+try:
+    import litellm
+    litellm.set_verbose = False
+    os.environ['LITELLM_LOG'] = 'ERROR'
+    os.environ['LITELLM_DROP_DEBUG_LOGS'] = 'True'
+except ImportError:
+    pass
 
 # API Keys
 GOOGLE_API_KEY: Final[str] = os.getenv("GOOGLE_API_KEY", "")
@@ -26,4 +42,4 @@ NOTION_MCP_REFERENCE: Final[str] = "notionApi"
 ELEVENLABS_MCP_REFERENCE: Final[str] = "elevenLabsApi"
 
 # ADK Configuration
-ADK_MODEL: Final[str] = os.getenv("ADK_MODEL", "gemini-2.0-flash") 
+ADK_MODEL: Final[str] = os.getenv("ADK_MODEL", "gemini-2.5-flash") 

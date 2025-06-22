@@ -12,6 +12,7 @@ import httpx
 import os
 import traceback
 import uuid
+import logging
 from uuid import uuid4
 from typing import Any, Dict, List
 from dotenv import load_dotenv
@@ -30,6 +31,19 @@ from a2a.types import (
 
 # Load environment variables
 load_dotenv()
+
+# Configure logging to use stderr instead of stdout to avoid interfering with user interaction
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+# Disable litellm debug logging to prevent interference with user interaction
+import litellm
+litellm.set_verbose = False
+os.environ['LITELLM_LOG'] = 'ERROR'
 
 # Configuration
 AGENT_URL = os.getenv("HOST_AGENT_A2A_URL", "http://localhost:8001")
@@ -55,7 +69,7 @@ def create_send_message_payload(
     # Use stored context ID for conversation continuity if available
     if context_id is None and 'current_context_id' in st.session_state:
         context_id = st.session_state.current_context_id
-        print(f"🔍 DEBUG: Using stored contextId for continuity: {context_id}")
+        logger.debug(f"Using stored contextId for continuity: {context_id}")
     
     payload: Dict[str, Any] = {
         'message': {
@@ -85,21 +99,21 @@ async def send_message_to_agent(client: A2AClient, text: str, context_id: str | 
         send_payload = create_send_message_payload(text=text)
         request = SendMessageRequest(id=str(uuid4()), params=MessageSendParams(**send_payload))
         
-        print("🔍 DEBUG: Sending request to agent...")
+        logger.debug("Sending request to agent...")
         send_response: SendMessageResponse = await client.send_message(request)
         
-        # Debug logging to console
-        print(f"🔍 DEBUG: Response type: {type(send_response)}")
+        # Debug logging to stderr
+        logger.debug(f"Response type: {type(send_response)}")
         if hasattr(send_response, 'model_dump_json'):
-            print(f"🔍 DEBUG: Response JSON: {send_response.model_dump_json(exclude_none=True)}")
+            logger.debug(f"Response JSON: {send_response.model_dump_json(exclude_none=True)}")
         
         # Handle union type wrapper - access the actual response
         if hasattr(send_response, 'root'):
             actual_response = send_response.root
-            print(f"🔍 DEBUG: Found root attribute, type: {type(actual_response)}")
+            logger.debug(f"Found root attribute, type: {type(actual_response)}")
         else:
             actual_response = send_response
-            print("🔍 DEBUG: No root attribute, using response directly")
+            logger.debug("No root attribute, using response directly")
         
         # Check if we have result attribute on the actual response
         if not hasattr(actual_response, 'result'):
@@ -108,7 +122,7 @@ async def send_message_to_agent(client: A2AClient, text: str, context_id: str | 
 
         # Extract task ID and immediate response from agent's reply
         agent_reply_data = actual_response.result  # type: ignore
-        print(f"🔍 DEBUG: agent_reply_data type: {type(agent_reply_data)}")
+        logger.debug(f"agent_reply_data type: {type(agent_reply_data)}")
         
         # Check for immediate text response in parts (handle safely)
         immediate_text = None
@@ -119,27 +133,27 @@ async def send_message_to_agent(client: A2AClient, text: str, context_id: str | 
                     if hasattr(part, 'root') and hasattr(part.root, 'text'):
                         immediate_text = getattr(part.root, 'text', None)
                         if immediate_text:
-                            print(f"🔍 DEBUG: Found immediate text response: {immediate_text[:100]}...")
+                            logger.debug(f"Found immediate text response: {immediate_text[:100]}...")
                             break
 
         # Extract task ID from the message (matching test_client.py pattern)
         extracted_task_id: str | None = None
 
         # Handle both Pydantic models and dict responses
-        print(f"🔍 DEBUG: Checking for taskId attribute: {hasattr(agent_reply_data, 'taskId')}")
+        logger.debug(f"Checking for taskId attribute: {hasattr(agent_reply_data, 'taskId')}")
         if hasattr(agent_reply_data, 'taskId'):
             task_id_value = getattr(agent_reply_data, 'taskId', None)
-            print(f"🔍 DEBUG: taskId value from attribute: {task_id_value}")
+            logger.debug(f"taskId value from attribute: {task_id_value}")
             if isinstance(task_id_value, str):
                 extracted_task_id = task_id_value
         
         if not extracted_task_id and isinstance(agent_reply_data, dict):
             task_id_value = agent_reply_data.get('taskId')
-            print(f"🔍 DEBUG: taskId value from dict: {task_id_value}")
+            logger.debug(f"taskId value from dict: {task_id_value}")
             if isinstance(task_id_value, str):
                 extracted_task_id = task_id_value
 
-        print(f"🔍 DEBUG: Final extracted_task_id: {extracted_task_id}")
+        logger.debug(f"Final extracted_task_id: {extracted_task_id}")
 
         if not extracted_task_id:
             st.error("Could not extract taskId from the agent's reply")
@@ -150,14 +164,14 @@ async def send_message_to_agent(client: A2AClient, text: str, context_id: str | 
             if 'immediate_responses' not in st.session_state:
                 st.session_state.immediate_responses = {}
             st.session_state.immediate_responses[extracted_task_id] = immediate_text
-            print(f"🔍 DEBUG: Stored immediate response for task {extracted_task_id}")
+            logger.debug(f"Stored immediate response for task {extracted_task_id}")
 
         # Store contextId for conversation continuity
         if hasattr(agent_reply_data, 'contextId'):
             context_id = getattr(agent_reply_data, 'contextId', None)
             if context_id:
                 st.session_state.current_context_id = context_id
-                print(f"🔍 DEBUG: Stored contextId for continuity: {context_id}")
+                logger.debug(f"Stored contextId for continuity: {context_id}")
 
         return extracted_task_id
         
@@ -169,38 +183,31 @@ async def send_message_to_agent(client: A2AClient, text: str, context_id: str | 
 
 
 async def poll_for_task_completion(client: A2AClient, task_id: str) -> Dict[str, Any]:
-    """Poll for task completion and return structured results.
+    """Poll the agent for task completion.
     
     Args:
         client: The A2A client to use
         task_id: The task ID to poll for
         
     Returns:
-        Dict: Structured results containing final response, tool calls, etc.
+        Dict with final response, tool calls, and any artifacts
     """
-    results = {
-        'final_response': '',
-        'tool_calls': [],
-        'tool_responses': [],
-        'audio_url': None,
-        'success': False
-    }
     
-
     # Check for immediate response first
-    if ('immediate_responses' in st.session_state and 
-        task_id in st.session_state.immediate_responses):
-        immediate_text = st.session_state.immediate_responses[task_id]
-        print(f"🔍 DEBUG: Using immediate response for task {task_id}")
-        results['final_response'] = immediate_text
-        results['success'] = True
-        # Clean up the immediate response
-        del st.session_state.immediate_responses[task_id]
-        return results
+    if 'immediate_responses' in st.session_state and task_id in st.session_state.immediate_responses:
+        immediate_response = st.session_state.immediate_responses[task_id]
+        logger.debug(f"Using immediate response for task {task_id}")
+        return {
+            'final_response': immediate_response,
+            'tool_calls': [],
+            'tool_responses': [],
+            'audio_url': None,
+            'success': True
+        }
     
     try:
         task_status = "unknown"
-        print(f"🔍 DEBUG: No immediate response found, starting polling for task {task_id}")
+        logger.debug(f"No immediate response found, starting polling for task {task_id}")
         
         for attempt in range(MAX_RETRIES):
             get_request = GetTaskRequest(id=str(uuid4()), params=TaskQueryParams(id=task_id))
@@ -218,65 +225,79 @@ async def poll_for_task_completion(client: A2AClient, task_id: str) -> Dict[str,
                     continue
             else:
                 continue
-                
-            if actual_task_result and hasattr(actual_task_result, 'status'):
-                task_status = actual_task_result.status.state
-                
-                if task_status in ["completed", "failed"]:
-                    if task_status == "completed" and hasattr(actual_task_result, 'artifacts') and actual_task_result.artifacts:
-                        # Process artifacts to extract results
-                        final_text_parts = []
-                        
-                        for artifact_item in actual_task_result.artifacts:
-                            if isinstance(artifact_item, dict):
-                                parts_list = artifact_item.get('parts')
-                                if isinstance(parts_list, list):
-                                    for part_data in parts_list:
-                                        if isinstance(part_data, dict):
-                                            text = part_data.get('text')
-                                            audio_url = part_data.get('audio_url')
-                                            
-                                            if text:
-                                                final_text_parts.append(text)
-                                            if audio_url and not results['audio_url']:
-                                                results['audio_url'] = audio_url
-                        
-                        results['final_response'] = '\n'.join(final_text_parts) if final_text_parts else "Task completed successfully."
-                        results['success'] = True
-                        
-                    elif task_status == "failed":
-                        error_msg = actual_task_result.status.message if hasattr(actual_task_result.status, 'message') and actual_task_result.status.message else "Task failed"
-                        results['final_response'] = f"❌ Task Failed: {error_msg}"
-                        results['success'] = False
-                    
-                    return results
+
+            # Check status
+            task_status = getattr(actual_task_result, 'status', 'unknown')
             
-            # If not completed, wait and retry
-            if attempt < MAX_RETRIES - 1 and task_status not in ["completed", "failed"]:
+            if task_status == 'completed':
+                # Task completed successfully
+                final_response = ""
+                tool_calls = []
+                tool_responses = []
+                audio_url = None
+                
+                # Process parts if they exist
+                parts = getattr(actual_task_result, 'parts', [])
+                for part in parts:
+                    if hasattr(part, 'root'):
+                        part_data = part.root
+                        if hasattr(part_data, 'text'):
+                            final_response += getattr(part_data, 'text', '')
+                        if hasattr(part_data, 'toolCall'):
+                            tool_call = getattr(part_data, 'toolCall', None)
+                            if tool_call:
+                                tool_calls.append(tool_call)
+                        if hasattr(part_data, 'toolResponse'):
+                            tool_response = getattr(part_data, 'toolResponse', None)
+                            if tool_response:
+                                tool_responses.append(tool_response)
+                
+                return {
+                    'final_response': final_response.strip() if final_response else "Task completed successfully",
+                    'tool_calls': tool_calls,
+                    'tool_responses': tool_responses,
+                    'audio_url': audio_url,
+                    'success': True
+                }
+                
+            elif task_status == 'failed':
+                error_message = getattr(actual_task_result, 'error', 'Task failed with unknown error')
+                return {
+                    'final_response': f"❌ Task failed: {error_message}",
+                    'tool_calls': [],
+                    'tool_responses': [],
+                    'audio_url': None,
+                    'success': False
+                }
+                
+            elif task_status in ['pending', 'running']:
+                # Task still running, continue polling
+                st.info(f"🔄 Task {task_status}... (attempt {attempt + 1}/{MAX_RETRIES})")
                 await asyncio.sleep(RETRY_DELAY)
-            elif task_status in ["completed", "failed"]:
-                break
+                continue
+            else:
+                # Unknown status
+                st.warning(f"⚠️ Unknown task status: {task_status}")
+                await asyncio.sleep(RETRY_DELAY)
+                continue
         
-        # If we get here, max retries reached
-        results['final_response'] = f"⏰ Timeout: Task did not complete after {MAX_RETRIES} attempts"
-        results['success'] = False
-        return results
+        # If we've exhausted all retries
+        return {
+            'final_response': f"⏰ Task did not complete within {MAX_RETRIES * RETRY_DELAY} seconds. Last status: {task_status}",
+            'tool_calls': [],
+            'tool_responses': [],
+            'audio_url': None,
+            'success': False
+        }
         
     except Exception as e:
-        results['final_response'] = f"Error polling for task completion: {str(e)}"
-        results['success'] = False
-        return results
-
-
-@st.cache_resource
-def get_a2a_client() -> None:
-    """Initialize A2A client connection placeholder.
-    
-    Note: Due to async requirements, actual client creation happens in run_agent_logic_a2a.
-    This function serves as a placeholder for Streamlit's caching mechanism.
-    """
-    print("🔧 A2A Client placeholder initialized (actual client created per request)")
-    return None
+        return {
+            'final_response': f"❌ Error polling for task completion: {str(e)}",
+            'tool_calls': [],
+            'tool_responses': [],
+            'audio_url': None,
+            'success': False
+        }
 
 
 async def create_a2a_client() -> A2AClient | None:
@@ -286,10 +307,10 @@ async def create_a2a_client() -> A2AClient | None:
         A2AClient | None: The A2A client or None if connection failed
     """
     try:
-        print(f"🔍 DEBUG: Connecting to agent at {AGENT_URL}")
+        logger.debug(f"Connecting to agent at {AGENT_URL}")
         httpx_client = httpx.AsyncClient(timeout=TIMEOUT)
         client = await A2AClient.get_client_from_agent_card_url(httpx_client, AGENT_URL)
-        print("🔍 DEBUG: A2A client created successfully")
+        logger.debug("A2A client created successfully")
         return client
     except httpx.ConnectError as e:
         st.error(f"❌ Connection error: Could not connect to agent at {AGENT_URL}. Ensure the server is running.")
@@ -328,10 +349,10 @@ async def run_agent_logic_a2a(prompt: str) -> Dict[str, Any]:
             }
         
         # Step 1: Send message and get task ID
-        print("🔍 DEBUG: Step 1 - Sending message to agent")
+        logger.debug("Step 1 - Sending message to agent")
         task_id = await send_message_to_agent(client, prompt)
         if not task_id:
-            print("🔍 DEBUG: Failed to get task ID from agent")
+            logger.debug("Failed to get task ID from agent")
             return {
                 'final_response': "❌ Failed to send message to agent",
                 'tool_calls': [],
@@ -341,10 +362,10 @@ async def run_agent_logic_a2a(prompt: str) -> Dict[str, Any]:
             }
         
         st.info(f"📤 Task submitted with ID: {task_id}")
-        print(f"🔍 DEBUG: Got task ID: {task_id}")
+        logger.debug(f"Got task ID: {task_id}")
         
         # Step 2: Poll for completion
-        print("🔍 DEBUG: Step 2 - Starting polling")
+        logger.debug("Step 2 - Starting polling")
         with st.spinner("🔄 Polling for task completion..."):
             results = await poll_for_task_completion(client, task_id)
         
@@ -401,9 +422,6 @@ def main():
         page_icon="🌐",
         layout="wide"
     )
-    
-    # Initialize the cached A2A client
-    get_a2a_client()
     
     # Initialize session state for UI elements
     initialize_session_state()
